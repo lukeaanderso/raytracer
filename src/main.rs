@@ -534,9 +534,9 @@ impl Scene {
         let mut rng = rand::thread_rng();
         
         let camera = Camera::look_at(
-            Vec3::new(0.0, 1.2, -4.0),
-            Vec3::new(0.0, 0.2, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.8,-2.25),  // Same distance but from behind
+            Vec3::new(0.0, 0.2, 0.0),  // Looking at origin
+            Vec3::new(0.0, 1.0, 0.0),  // Up vector
         );
 
         let mut objects = vec![
@@ -707,9 +707,9 @@ fn matrices_to_png(r: &Matrix, g: &Matrix, b: &Matrix, output_path: &str) -> Res
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Double the resolution
-    let width = 1600;
-    let height = 1200;
-    let samples_per_pixel = 1024;
+    let width = 1920;
+    let height = 1080;
+    let samples_per_pixel = 64*1024;
     
     let scene = Scene::new(width, height, samples_per_pixel);
     let (r, g, b) = scene.render();
