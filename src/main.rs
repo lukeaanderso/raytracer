@@ -17,7 +17,7 @@ struct Vec3 {
 }
 
 impl Vec3 {
-    fn new(x: f64, y: f64, z: f64) -> Self {
+    fn new(x: f64, y: f64, z: f64) -> Vec3 {
         Vec3 { x, y, z }
     }
 
@@ -389,12 +389,12 @@ impl Camera {
         Camera {
             position,
             forward,
-            up,
             right,
+            up,
         }
     }
 
-    fn get_ray_direction(&self, u: f64, v: f64, viewport_width: f64, viewport_height: f64, focal_length: f64) -> Vec3 {
+    fn get_ray(&self, u: f64, v: f64, viewport_width: f64, viewport_height: f64, focal_length: f64) -> Ray {
         let horizontal = self.right.scale(viewport_width);
         let vertical = self.up.scale(viewport_height);
         
@@ -403,11 +403,16 @@ impl Camera {
         let viewport_u = horizontal.scale(u - 0.5);
         let viewport_v = vertical.scale(v - 0.5);
         
-        viewport_center
+        let direction = viewport_center
             .add(&viewport_u)
             .add(&viewport_v)
             .subtract(&self.position)
-            .normalize()
+            .normalize();
+        
+        Ray {
+            origin: self.position,
+            direction,
+        }
     }
 }
 
@@ -597,14 +602,7 @@ impl Scene {
             let u = ((i as f64) + rng.gen::<f64>()) / (self.width as f64 - 1.0);
             let v = ((j as f64) + rng.gen::<f64>()) / (self.height as f64 - 1.0);
 
-            let direction = self.camera.get_ray_direction(
-                u, v,
-                self.viewport_width,
-                self.viewport_height,
-                self.focal_length
-            );
-
-            let ray = Ray::new(self.camera.position, direction);
+            let ray = self.camera.get_ray(u, v, self.viewport_width, self.viewport_height, self.focal_length);
             color = color.add(&color_ray(&ray, &self.objects, 5));
         }
 
