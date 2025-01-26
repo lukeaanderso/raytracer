@@ -3,6 +3,10 @@ use image::{ImageBuffer, Rgb};
 use std::path::Path;
 use rand::Rng;
 use rayon::prelude::*;
+use std::time::Instant;
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // 3D Vector representation
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +73,10 @@ impl Vec3 {
             z: self.z * other.z,
         }
     }
+
+    fn length(&self) -> f64 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
 }
 
 // Ray representation
@@ -95,10 +103,16 @@ impl Ray {
 }
 
 // Object trait for different shapes
+use std::any::Any;
+
 trait Object: Send + Sync {
     fn intersect(&self, ray: &Ray) -> Option<f64>;
     fn normal_at(&self, point: &Vec3) -> Vec3;
     fn box_clone(&self) -> Box<dyn Object>;
+    fn as_any(&self) -> &dyn Any;
+    fn center(&self) -> Option<Vec3> {
+        None
+    }
 }
 
 impl Clone for Box<dyn Object> {
@@ -148,6 +162,14 @@ impl Object for Sphere {
     fn box_clone(&self) -> Box<dyn Object> {
         Box::new(self.clone())
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn center(&self) -> Option<Vec3> {
+        Some(self.center)
+    }
 }
 
 // Material types
@@ -192,6 +214,34 @@ impl Material {
             color,
             ambient: 0.2,
             diffuse: 0.8,
+        }
+    }
+
+    fn random_diffuse(rng: &mut impl Rng) -> Self {
+        Material {
+            material_type: MaterialType::Diffuse,
+            color: Vec3::new(
+                rng.gen_range(0.3..0.9),
+                rng.gen_range(0.3..0.9),
+                rng.gen_range(0.3..0.9),
+            ),
+            ambient: 0.1,
+            diffuse: 0.9,
+        }
+    }
+
+    fn random_metal(rng: &mut impl Rng) -> Self {
+        Material {
+            material_type: MaterialType::Metal {
+                fuzz: rng.gen_range(0.0..0.2),
+            },
+            color: Vec3::new(
+                rng.gen_range(0.6..0.9),
+                rng.gen_range(0.6..0.9),
+                rng.gen_range(0.6..0.9),
+            ),
+            ambient: 0.1,
+            diffuse: 0.5,
         }
     }
 }
@@ -391,46 +441,128 @@ struct Scene {
 }
 
 impl Scene {
-    fn new(width: u32, height: u32) -> Self {
+    fn generate_random_spheres(rng: &mut impl Rng) -> Vec<SceneObject> {
+        let mut spheres: Vec<SceneObject> = Vec::new();
+        
+        // Add 15 random small spheres
+        for _ in 0..15 {
+            let radius = 0.12; // Keep them all the same small size
+            
+            // Try to find a non-overlapping position
+            let mut attempts = 0;
+            let max_attempts = 100;
+            
+            'position_search: loop {
+                // Generate random position within reasonable bounds
+                let pos = Vec3::new(
+                    rng.gen_range(-2.0..2.0),
+                    radius,  // Keep them on the ground
+                    rng.gen_range(-1.5..1.5),
+                );
+                
+                // Check distance from main spheres (hardcoded positions)
+                let main_positions = [
+                    (Vec3::new(0.0, 0.7, 0.8), 0.9),   // glass
+                    (Vec3::new(-1.4, 0.45, 0.2), 0.6), // steel
+                    (Vec3::new(0.8, 0.25, -0.6), 0.25), // small glass
+                    (Vec3::new(1.4, 0.35, 0.2), 0.45),  // copper
+                    (Vec3::new(0.0, 0.25, -1.0), 0.35), // orange
+                    (Vec3::new(-0.7, 0.15, -0.5), 0.15), // blue
+                ];
+                
+                // Check distance from existing random spheres
+                let mut too_close = false;
+                for existing_sphere in &spheres {
+                    if let Some(sphere) = existing_sphere.shape.as_any().downcast_ref::<Sphere>() {
+                        let dist = pos.subtract(&sphere.center).length();
+                        if dist < (radius + 0.12) * 1.2 { // Add 20% spacing
+                            too_close = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if too_close {
+                    attempts += 1;
+                    if attempts >= max_attempts {
+                        break;
+                    }
+                    continue;
+                }
+                
+                // Check distance from main spheres
+                for (center, main_radius) in main_positions.iter() {
+                    let dist = pos.subtract(center).length();
+                    if dist < (radius + main_radius) * 1.2 { // Add 20% spacing
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            break 'position_search;
+                        }
+                        continue 'position_search;
+                    }
+                }
+                
+                // Position is good, create the sphere
+                let material = if rng.gen_bool(0.7) {
+                    Material::random_diffuse(rng)
+                } else if rng.gen_bool(0.7) {
+                    Material::random_metal(rng)
+                } else {
+                    Material::glass(1.52)
+                };
+                
+                spheres.push(SceneObject {
+                    shape: Box::new(Sphere::new(pos, radius)),
+                    material,
+                });
+                
+                break;
+            }
+        }
+        
+        spheres
+    }
+
+    fn new(width: u32, height: u32, samples_per_pixel: u32) -> Self {
         let aspect_ratio = width as f64 / height as f64;
         let viewport_height = 2.0;
+        let mut rng = rand::thread_rng();
         
-        // Bring camera closer and lower
         let camera = Camera::look_at(
-            Vec3::new(0.0, 1.5, -6.0),  // Even closer and lower
-            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.2, -4.0),
+            Vec3::new(0.0, 0.2, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
         );
 
-        let objects = vec![
+        let mut objects = vec![
             // Large glass sphere - center back
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(0.0, 0.8, 0.5), 1.2)),
+                shape: Box::new(Sphere::new(Vec3::new(0.0, 0.7, 0.8), 0.9)),
                 material: Material::glass(1.52),
             },
             // Steel sphere - left
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(-1.5, 0.5, 0.0), 0.8)),
+                shape: Box::new(Sphere::new(Vec3::new(-1.4, 0.45, 0.2), 0.6)),
                 material: Material::metal(Vec3::new(0.7, 0.7, 0.75), 0.05),
             },
             // Small glass sphere - front right
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(0.8, 0.3, -0.8), 0.3)),
+                shape: Box::new(Sphere::new(Vec3::new(0.8, 0.25, -0.6), 0.25)),
                 material: Material::glass(1.52),
             },
             // Copper sphere - right
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(1.5, 0.4, 0.0), 0.6)),
+                shape: Box::new(Sphere::new(Vec3::new(1.4, 0.35, 0.2), 0.45)),
                 material: Material::metal(Vec3::new(0.722, 0.451, 0.20), 0.1),
             },
             // Orange sphere - front center
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(0.0, 0.3, -1.2), 0.5)),
+                shape: Box::new(Sphere::new(Vec3::new(0.0, 0.25, -1.0), 0.35)),
                 material: Material::diffuse(Vec3::new(1.0, 0.5, 0.0)),
             },
             // Blue sphere - front left
             SceneObject {
-                shape: Box::new(Sphere::new(Vec3::new(-0.8, 0.2, -0.6), 0.2)),
+                shape: Box::new(Sphere::new(Vec3::new(-0.7, 0.15, -0.5), 0.15)),
                 material: Material::diffuse(Vec3::new(0.1, 0.2, 0.6)),
             },
             // Ground plane (large sphere below)
@@ -439,6 +571,9 @@ impl Scene {
                 material: Material::diffuse(Vec3::new(0.2, 0.2, 0.2)),
             },
         ];
+        
+        // Add random small spheres
+        objects.extend(Self::generate_random_spheres(&mut rng));
 
         Scene {
             width,
@@ -448,7 +583,7 @@ impl Scene {
             viewport_width: viewport_height * aspect_ratio,
             focal_length: 1.0,
             objects,
-            samples_per_pixel: 64,
+            samples_per_pixel,
         }
     }
 
@@ -480,9 +615,19 @@ impl Scene {
     fn render(&self) -> (Matrix, Matrix, Matrix) {
         let height = self.height as usize;
         let width = self.width as usize;
+        let start_time = Instant::now();
 
         // Create vectors to store our color data
         let mut pixels = vec![(0.0, 0.0, 0.0); width * height];
+        let total_pixels = width * height;
+        
+        // Create atomic counter for progress
+        let counter = Arc::new(AtomicUsize::new(0));
+        let last_print = Arc::new(AtomicUsize::new(0));
+
+        println!("Starting render at {}x{} with {} samples per pixel...", width, height, self.samples_per_pixel);
+        print!("Progress: 0%");
+        io::stdout().flush().unwrap();
 
         // Process pixels in parallel
         pixels.par_iter_mut().enumerate().for_each(|(idx, pixel)| {
@@ -490,7 +635,28 @@ impl Scene {
             let j = (idx / width) as u32;
             let color = self.get_pixel_color(i, j);
             *pixel = (color.x, color.y, color.z);
+
+            // Update progress atomically
+            let completed = counter.fetch_add(1, Ordering::Relaxed);
+            let percent = (completed * 100) / total_pixels;
+            let last = last_print.load(Ordering::Relaxed);
+            
+            if percent > last && last_print.compare_exchange(last, percent, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                let elapsed = start_time.elapsed();
+                let eta = if percent > 0 {
+                    elapsed.mul_f64(100.0 / percent as f64) - elapsed
+                } else {
+                    elapsed
+                };
+                print!("\rProgress: {}% (ETA: {:.1}s)    ", 
+                    percent,
+                    eta.as_secs_f64()
+                );
+                io::stdout().flush().unwrap();
+            }
         });
+
+        println!("\nRender completed in {:.1}s", start_time.elapsed().as_secs_f64());
 
         // Create the result matrices
         let mut r_data = vec![vec![0.0; width]; height];
@@ -542,13 +708,13 @@ fn matrices_to_png(r: &Matrix, g: &Matrix, b: &Matrix, output_path: &str) -> Res
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create and render scene
-    let scene = Scene::new(800, 600);
-    let (r_matrix, g_matrix, b_matrix) = scene.render();
-
-    // Save the rendered image
-    matrices_to_png(&r_matrix, &g_matrix, &b_matrix, "sphere.png")?;
-    println!("Image saved as sphere.png");
+    // Double the resolution
+    let width = 1600;
+    let height = 1200;
+    let samples_per_pixel = 1024;
     
+    let scene = Scene::new(width, height, samples_per_pixel);
+    let (r, g, b) = scene.render();
+    matrices_to_png(&r, &g, &b, "sphere.png")?;
     Ok(())
 }
