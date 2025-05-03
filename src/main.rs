@@ -446,7 +446,91 @@ struct Scene {
 }
 
 impl Scene {
-    fn generate_random_spheres(rng: &mut impl Rng) -> Vec<SceneObject> {
+    fn generate_random_spheres(rng: &mut impl Rng, main_spheres: &[SceneObject]) -> Vec<SceneObject> {
+        let mut spheres: Vec<SceneObject> = Vec::new();
+        
+        // Number of small spheres to add
+        let num_small_spheres = rng.gen_range(10..25);
+        
+        // Add random small spheres
+        for _ in 0..num_small_spheres {
+            // Randomize radius slightly for more variety
+            let radius = rng.gen_range(0.08..0.15);
+            
+            // Try to find a non-overlapping position
+            let mut attempts = 0;
+            let max_attempts = 100;
+            
+            'position_search: loop {
+                // Generate random position within reasonable bounds
+                let pos = Vec3::new(
+                    rng.gen_range(-2.5..2.5),
+                    radius,  // Keep them on the ground
+                    rng.gen_range(-2.0..2.0),
+                );
+                
+                // Check distance from existing random spheres
+                let mut too_close = false;
+                for existing_sphere in &spheres {
+                    if let Some(sphere) = existing_sphere.shape.as_any().downcast_ref::<Sphere>() {
+                        let dist = pos.subtract(&sphere.center).length();
+                        if dist < (radius + sphere.radius) * 1.2 { // Add 20% spacing
+                            too_close = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if too_close {
+                    attempts += 1;
+                    if attempts >= max_attempts {
+                        break;
+                    }
+                    continue;
+                }
+                
+                // Check distance from main spheres
+                for main_sphere in main_spheres {
+                    if let Some(sphere) = main_sphere.shape.as_any().downcast_ref::<Sphere>() {
+                        // Skip the ground plane sphere
+                        if sphere.radius > 100.0 {
+                            continue;
+                        }
+                        
+                        let dist = pos.subtract(&sphere.center).length();
+                        if dist < (radius + sphere.radius) * 1.2 { // Add 20% spacing
+                            attempts += 1;
+                            if attempts >= max_attempts {
+                                break 'position_search;
+                            }
+                            continue 'position_search;
+                        }
+                    }
+                }
+                
+                // Position is good, create the sphere
+                let material = match rng.gen_range(0..10) {
+                    0..=5 => Material::random_diffuse(rng),   // 60% diffuse
+                    6..=8 => Material::random_metal(rng),     // 30% metal
+                    _ => {                                     // 10% glass
+                        let ref_idx = rng.gen_range(1.3..1.7);
+                        Material::glass(ref_idx)
+                    }
+                };
+                
+                spheres.push(SceneObject {
+                    shape: Box::new(Sphere::new(pos, radius)),
+                    material,
+                });
+                
+                break;
+            }
+        }
+        
+        spheres
+    }
+    
+    fn generate_random_spheres_original(rng: &mut impl Rng) -> Vec<SceneObject> {
         let mut spheres: Vec<SceneObject> = Vec::new();
         
         // Add 15 random small spheres
@@ -578,7 +662,7 @@ impl Scene {
         ];
         
         // Add random small spheres
-        objects.extend(Self::generate_random_spheres(&mut rng));
+        objects.extend(Self::generate_random_spheres_original(&mut rng));
 
         Scene {
             width,
@@ -588,6 +672,118 @@ impl Scene {
             viewport_width: viewport_height * aspect_ratio,
             focal_length: 1.0,
             objects,
+            samples_per_pixel,
+        }
+    }
+    
+    fn generate_random_camera(rng: &mut impl Rng) -> Camera {
+        // Generate random camera position on a circle around the scene
+        let angle = rng.gen_range(0.0..std::f64::consts::TAU);
+        let distance = rng.gen_range(2.0..3.0);
+        let height = rng.gen_range(0.6..1.2);
+        
+        let camera_pos = Vec3::new(
+            distance * angle.cos(), 
+            height, 
+            distance * angle.sin()
+        );
+        
+        // Look at a slightly randomized point near the origin
+        let look_at_point = Vec3::new(
+            rng.gen_range(-0.2..0.2),
+            rng.gen_range(0.1..0.4),
+            rng.gen_range(-0.2..0.2),
+        );
+        
+        Camera::look_at(
+            camera_pos,
+            look_at_point,
+            Vec3::new(0.0, 1.0, 0.0), // Up vector
+        )
+    }
+    
+    fn new_random(width: u32, height: u32, samples_per_pixel: u32) -> Self {
+        let aspect_ratio = width as f64 / height as f64;
+        let viewport_height = 2.0;
+        let mut rng = rand::thread_rng();
+        
+        // Generate random camera position
+        let camera = Self::generate_random_camera(&mut rng);
+        
+        // Create a ground plane with random color tint
+        let ground = SceneObject {
+            shape: Box::new(Sphere::new(Vec3::new(0.0, -200.0, 0.0), 200.0)),
+            material: Material::diffuse(Vec3::new(
+                rng.gen_range(0.1..0.3),
+                rng.gen_range(0.1..0.3),
+                rng.gen_range(0.1..0.3),
+            )),
+        };
+        
+        let mut main_objects = vec![ground];
+        
+        // Randomize the number of primary spheres
+        let num_large_spheres = rng.gen_range(3..7);
+        
+        // Add random primary spheres
+        for i in 0..num_large_spheres {
+            // Generate position in a circular pattern
+            let angle = (i as f64 / num_large_spheres as f64) * std::f64::consts::TAU;
+            let radius = rng.gen_range(1.0..1.8);
+            let pos_x = radius * angle.cos();
+            let pos_z = radius * angle.sin();
+            
+            // Small random offsets to position
+            let pos_x = pos_x + rng.gen_range(-0.3..0.3);
+            let pos_z = pos_z + rng.gen_range(-0.3..0.3);
+            
+            // Randomize sphere size
+            let sphere_radius = rng.gen_range(0.3..0.9);
+            
+            // Position y coordinate based on radius (so spheres sit on ground)
+            let pos_y = sphere_radius;
+            
+            // Choose material randomly
+            let material = match rng.gen_range(0..3) {
+                0 => Material::glass(rng.gen_range(1.4..1.6)),
+                1 => Material::metal(
+                    Vec3::new(
+                        rng.gen_range(0.5..0.95),
+                        rng.gen_range(0.5..0.95),
+                        rng.gen_range(0.5..0.95),
+                    ),
+                    rng.gen_range(0.0..0.2),
+                ),
+                _ => Material::diffuse(
+                    Vec3::new(
+                        rng.gen_range(0.1..1.0),
+                        rng.gen_range(0.1..1.0),
+                        rng.gen_range(0.1..1.0),
+                    ),
+                ),
+            };
+            
+            main_objects.push(
+                SceneObject {
+                    shape: Box::new(Sphere::new(Vec3::new(pos_x, pos_y, pos_z), sphere_radius)),
+                    material,
+                }
+            );
+        }
+        
+        // Add random small spheres
+        let small_spheres = Self::generate_random_spheres(&mut rng, &main_objects);
+        let mut all_objects = main_objects;
+        all_objects.extend(small_spheres);
+        
+        Scene {
+            width,
+            height,
+            camera,
+            viewport_height,
+            viewport_width: viewport_height * aspect_ratio,
+            focal_length: 1.0,
+            objects: all_objects,
             samples_per_pixel,
         }
     }
@@ -707,12 +903,28 @@ fn matrices_to_png(r: &Matrix, g: &Matrix, b: &Matrix, output_path: &str) -> Res
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Double the resolution
-    let width = 1920;
-    let height = 1080;
-    let samples_per_pixel = 64*1024;
+    let width = 640 ;
+    let height = 480;
+    let samples_per_pixel = 64;
     
-    let scene = Scene::new(width, height, samples_per_pixel);
+    // Check command line arguments for random mode
+    let args: Vec<String> = std::env::args().collect();
+    let random_mode = args.len() > 1 && args[1] == "--random";
+    
+    let scene = if random_mode {
+        Scene::new_random(width, height, samples_per_pixel)
+    } else {
+        Scene::new(width, height, samples_per_pixel)
+    };
+    
+    let output_path = if random_mode {
+        "random_sphere.png"
+    } else {
+        "sphere.png"
+    };
+    
     let (r, g, b) = scene.render();
-    matrices_to_png(&r, &g, &b, "sphere.png")?;
+    matrices_to_png(&r, &g, &b, output_path)?;
+    println!("Image saved to {}", output_path);
     Ok(())
 }
